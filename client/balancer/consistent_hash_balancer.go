@@ -4,8 +4,6 @@ import (
 	"fmt"
 	"log"
 
-	"google.golang.org/grpc/attributes"
-
 	"google.golang.org/grpc/balancer"
 	"google.golang.org/grpc/balancer/base"
 	"google.golang.org/grpc/connectivity"
@@ -25,8 +23,8 @@ type consistentHashBalancerBuilder struct{}
 func (c *consistentHashBalancerBuilder) Build(cc balancer.ClientConn, opts balancer.BuildOptions) balancer.Balancer {
 	return &consistentHashBalancer{
 		cc:       cc,
-		subConns: make(map[resolver.Address]subConnInfo),
-		scStates: make(map[balancer.SubConn]connectivity.State),
+		subConns: make(map[string]balancer.SubConn),
+		scInfos:  make(map[balancer.SubConn]*subConnInfo),
 		csEvltr:  &balancer.ConnectivityStateEvaluator{},
 	}
 }
@@ -36,8 +34,8 @@ func (c *consistentHashBalancerBuilder) Name() string {
 }
 
 type subConnInfo struct {
-	subConn balancer.SubConn
-	attrs   *attributes.Attributes
+	state connectivity.State
+	addr  string
 }
 
 // consistentHashBalancer is modified from baseBalancer, you can refer to https://github.com/grpc/grpc-go/blob/master/balancer/base/balancer.go
@@ -48,8 +46,8 @@ type consistentHashBalancer struct {
 	csEvltr *balancer.ConnectivityStateEvaluator
 	state   connectivity.State
 
-	subConns map[resolver.Address]subConnInfo
-	scStates map[balancer.SubConn]connectivity.State
+	subConns map[string]balancer.SubConn
+	scInfos  map[balancer.SubConn]*subConnInfo
 	picker   balancer.Picker
 
 	resolverErr error // the last error reported by the resolver; cleared on successful resolution
@@ -58,34 +56,34 @@ type consistentHashBalancer struct {
 
 func (c *consistentHashBalancer) UpdateClientConnState(s balancer.ClientConnState) error {
 	c.resolverErr = nil
-	addrsSet := make(map[resolver.Address]struct{})
+	addrsSet := make(map[string]struct{})
 	for _, a := range s.ResolverState.Addresses {
-		aNoAttrs := a
-		aNoAttrs.Attributes = nil
-		addrsSet[aNoAttrs] = struct{}{}
-		if scInfo, ok := c.subConns[aNoAttrs]; !ok {
-			sc, err := c.cc.NewSubConn([]resolver.Address{a}, balancer.NewSubConnOptions{HealthCheckEnabled: false})
+		addr := a.Addr
+		addrsSet[addr] = struct{}{}
+		if sc, ok := c.subConns[addr]; !ok {
+			newSC, err := c.cc.NewSubConn([]resolver.Address{a}, balancer.NewSubConnOptions{HealthCheckEnabled: false})
 			if err != nil {
 				log.Printf("Consistent Hash Balancer: failed to create new SubConn: %v", err)
 				continue
 			}
-			c.subConns[aNoAttrs] = subConnInfo{subConn: sc, attrs: a.Attributes}
-			c.scStates[sc] = connectivity.Idle
-			//sc.Connect()
+			c.subConns[addr] = newSC
+			c.scInfos[newSC] = &subConnInfo{
+				state: connectivity.Idle,
+				addr:  addr,
+			}
+			//newSC.Connect()
 
 			// The next three lines is a way to cheat grpc. See line 99-100 for more details.
 			//c.ccCheater.Do(func() {
-			//	sc.Connect()
+			//	newSC.Connect()
 			//})
 		} else {
-			scInfo.attrs = a.Attributes
-			c.subConns[aNoAttrs] = scInfo
-			c.cc.UpdateAddresses(scInfo.subConn, []resolver.Address{a})
+			c.cc.UpdateAddresses(sc, []resolver.Address{a})
 		}
 	}
-	for a, scInfo := range c.subConns {
+	for a, sc := range c.subConns {
 		if _, ok := addrsSet[a]; !ok {
-			c.cc.RemoveSubConn(scInfo.subConn)
+			c.cc.RemoveSubConn(sc)
 			delete(c.subConns, a)
 		}
 	}
@@ -126,11 +124,11 @@ func (c *consistentHashBalancer) regeneratePicker() {
 		return
 	}
 	readySCs := make(map[string]balancer.SubConn)
-	for addr, scInfo := range c.subConns {
-		//if st, ok := c.scStates[scInfo.subConn]; ok && st == connectivity.Ready {
+	for addr, sc := range c.subConns {
+		//if st, ok := c.scInfos[scInfo.subConn]; ok && st == connectivity.Ready {
 		// The next line may not be safe, but we have to use subConns without check, for we didn't set up connections in function UpdateClientConnState.
-		if _, ok := c.scStates[scInfo.subConn]; ok {
-			readySCs[addr.Addr] = scInfo.subConn
+		if _, ok := c.scInfos[sc]; ok {
+			readySCs[addr] = sc
 		}
 	}
 	c.picker = NewConsistentHashPicker(readySCs)
@@ -148,20 +146,21 @@ func (c *consistentHashBalancer) mergeErrors() error {
 
 func (c *consistentHashBalancer) UpdateSubConnState(sc balancer.SubConn, state balancer.SubConnState) {
 	s := state.ConnectivityState
-	oldS, ok := c.scStates[sc]
+	oldInfo, ok := c.scInfos[sc]
 	if !ok {
 		return
 	}
+	oldS := oldInfo.state
 	log.Printf("state of one subConn changed from %s to %s\n", oldS.String(), s.String())
 	if oldS == connectivity.TransientFailure && s == connectivity.Connecting {
 		return
 	}
-	c.scStates[sc] = s
+	c.scInfos[sc].state = s
 	switch s {
 	case connectivity.Idle:
 		sc.Connect()
 	case connectivity.Shutdown:
-		delete(c.scStates, sc)
+		delete(c.scInfos, sc)
 	case connectivity.TransientFailure:
 		c.connErr = state.ConnectionError
 	}
