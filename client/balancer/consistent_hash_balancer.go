@@ -46,9 +46,10 @@ type consistentHashBalancer struct {
 	csEvltr *balancer.ConnectivityStateEvaluator
 	state   connectivity.State
 
-	subConns map[string]balancer.SubConn
-	scInfos  map[balancer.SubConn]*subConnInfo
-	picker   balancer.Picker
+	addrInfos map[string]resolver.Address
+	subConns  map[string]balancer.SubConn
+	scInfos   map[balancer.SubConn]*subConnInfo
+	picker    balancer.Picker
 
 	resolverErr error // the last error reported by the resolver; cleared on successful resolution
 	connErr     error // the last connection error; cleared upon leaving TransientFailure
@@ -59,6 +60,7 @@ func (c *consistentHashBalancer) UpdateClientConnState(s balancer.ClientConnStat
 	addrsSet := make(map[string]struct{})
 	for _, a := range s.ResolverState.Addresses {
 		addr := a.Addr
+		c.addrInfos[addr] = a
 		addrsSet[addr] = struct{}{}
 		if sc, ok := c.subConns[addr]; !ok {
 			newSC, err := c.cc.NewSubConn([]resolver.Address{a}, balancer.NewSubConnOptions{HealthCheckEnabled: false})
@@ -92,7 +94,7 @@ func (c *consistentHashBalancer) UpdateClientConnState(s balancer.ClientConnStat
 		return balancer.ErrBadResolverState
 	}
 
-	// As we want to do the connection management ourselves, we don't set up connection here in the loop.
+	// As we want to do the connection management ourselves, we don't set up connection here.
 	// Connection has not been ready yet. The next two lines is a trick aims to make grpc continue executing.
 	c.regeneratePicker()
 	c.cc.UpdateState(balancer.State{ConnectivityState: connectivity.Ready, Picker: c.picker})
@@ -176,3 +178,34 @@ func (c *consistentHashBalancer) UpdateSubConnState(sc balancer.SubConn, state b
 }
 
 func (c *consistentHashBalancer) Close() {}
+
+// TODO change return type from bool to error
+func (c *consistentHashBalancer) getSubConnAddr(sc balancer.SubConn) (string, bool) {
+	scInfo, ok := c.scInfos[sc]
+	if !ok {
+		return "", ok
+	}
+	return scInfo.addr, ok
+}
+
+// TODO change return type from bool to error
+func (c *consistentHashBalancer) resetSubConnWithAddr(addr string) bool {
+	sc, ok := c.subConns[addr]
+	if !ok {
+		return ok
+	}
+	delete(c.scInfos, sc)
+	c.cc.RemoveSubConn(sc)
+	newSC, err := c.cc.NewSubConn([]resolver.Address{c.addrInfos[addr]}, balancer.NewSubConnOptions{HealthCheckEnabled: false})
+	if err != nil {
+		log.Printf("Consistent Hash Balancer: failed to create new SubConn: %v", err)
+		return false
+	}
+	c.subConns[addr] = newSC
+	c.scInfos[newSC] = &subConnInfo{
+		state: connectivity.Idle,
+		addr:  addr,
+	}
+	c.regeneratePicker()
+	return true
+}
