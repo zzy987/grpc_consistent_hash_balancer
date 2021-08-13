@@ -133,7 +133,7 @@ func (c *consistentHashBalancer) regeneratePicker() {
 			readySCs[addr.Addr] = scInfo.subConn
 		}
 	}
-	c.picker = newConsistentHashPicker(readySCs)
+	c.picker = NewConsistentHashPicker(readySCs)
 }
 
 func (c *consistentHashBalancer) mergeErrors() error {

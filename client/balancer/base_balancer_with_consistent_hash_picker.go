@@ -29,5 +29,5 @@ func (b *consistentHashPickerBuilder) Build(buildInfo base.PickerBuildInfo) bala
 		subConns[conInfo.Address.Addr] = sc
 	}
 
-	return newConsistentHashPicker(subConns)
+	return NewConsistentHashPicker(subConns)
 }

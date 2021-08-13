@@ -12,7 +12,7 @@ type consistentHashPicker struct {
 	hashRing *hashring.HashRing
 }
 
-func newConsistentHashPicker(subConns map[string]balancer.SubConn) *consistentHashPicker {
+func NewConsistentHashPicker(subConns map[string]balancer.SubConn) *consistentHashPicker {
 	addrs := make([]string, 0)
 	for addr := range subConns {
 		addrs = append(addrs, addr)

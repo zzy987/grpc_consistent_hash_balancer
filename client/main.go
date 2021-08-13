@@ -15,30 +15,24 @@ import (
 const (
 	scheme      = "demo"
 	serviceName = "grpc.demo.consistent_hash_balancer"
+	maxAttempts = 4
 )
 
 var (
 	grpcServicePolicy = fmt.Sprintf(`{
-		"loadBalancingPolicy": "%s",
-		"methodConfig": [{
-		  "name": [{"service": "grpc.demo.Echo"}],
-		  "waitForReady": true,
-		  "retryPolicy": {
-			  "MaxAttempts": 4,
-			  "InitialBackoff": ".01s",
-			  "MaxBackoff": ".01s",
-			  "BackoffMultiplier": 1.0,
-			  "RetryableStatusCodes": [ "UNAVAILABLE" ]
-		  }
-		}]}`, balancer.Policy)
+		"loadBalancingPolicy": "%s"
+	}`, balancer.Policy)
 	addrs = []string{"localhost:50000", "localhost:50001", "localhost:50002"}
 )
 
 func unaryInterceptor(ctx context.Context, method string, req, reply interface{}, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
-	err := invoker(ctx, method, req, reply, cc, opts...)
-	if err != nil {
-		log.Println("--- interceptor get error ---")
+	var err error
+	for i := maxAttempts; i > 0; i-- {
 		err = invoker(ctx, method, req, reply, cc, opts...)
+		if err == nil {
+			break
+		}
+		log.Println("interceptor get error")
 	}
 	return err
 }
