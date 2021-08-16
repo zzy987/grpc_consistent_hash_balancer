@@ -66,23 +66,26 @@ type consistentHashBalancer struct {
 	csEvltr *balancer.ConnectivityStateEvaluator
 	state   connectivity.State
 
-	addrInfos map[string]resolver.Address
-	subConns  map[string]balancer.SubConn
-	scInfos   map[balancer.SubConn]*subConnInfo
-	picker    balancer.Picker
+	addrInfos   map[string]resolver.Address
+	subConns    map[string]balancer.SubConn
+	scInfos     map[balancer.SubConn]*subConnInfo
+	scInfosLock sync.RWMutex
+
+	picker balancer.Picker
 
 	resolverErr error // the last error reported by the resolver; cleared on successful resolution
 	connErr     error // the last connection error; cleared upon leaving TransientFailure
 
-	pickResultChan  chan PickResult
-	pickResults     *util.Queue
-	scRecords       map[balancer.SubConn]*scRecord
-	scConnCountLock sync.Mutex
+	pickResultChan chan PickResult
+	pickResults    *util.Queue
+	scRecords      map[balancer.SubConn]*scRecord
+	scRecordsLock  sync.Mutex
 }
 
 func (c *consistentHashBalancer) UpdateClientConnState(s balancer.ClientConnState) error {
 	c.resolverErr = nil
 	addrsSet := make(map[string]struct{})
+	c.scInfosLock.Lock()
 	for _, a := range s.ResolverState.Addresses {
 		addr := a.Addr
 		c.addrInfos[addr] = a
@@ -108,6 +111,7 @@ func (c *consistentHashBalancer) UpdateClientConnState(s balancer.ClientConnStat
 			c.cc.UpdateAddresses(sc, []resolver.Address{a})
 		}
 	}
+	c.scInfosLock.Unlock()
 	for a, sc := range c.subConns {
 		if _, ok := addrsSet[a]; !ok {
 			c.cc.RemoveSubConn(sc)
@@ -151,13 +155,14 @@ func (c *consistentHashBalancer) regeneratePicker() {
 		return
 	}
 	readySCs := make(map[string]balancer.SubConn)
+	c.scInfosLock.RLock()
 	for addr, sc := range c.subConns {
-		//if st, ok := c.scInfos[scInfo.subConn]; ok && st == connectivity.Ready {
 		// The next line may not be safe, but we have to use subConns without check, for we didn't set up connections in function UpdateClientConnState.
-		if _, ok := c.scInfos[sc]; ok {
+		if st, ok := c.scInfos[sc]; ok && st.state != connectivity.Shutdown {
 			readySCs[addr] = sc
 		}
 	}
+	c.scInfosLock.RUnlock()
 	c.picker = NewConsistentHashPickerWithReportChan(readySCs, c.pickResultChan)
 }
 
@@ -173,7 +178,10 @@ func (c *consistentHashBalancer) mergeErrors() error {
 
 func (c *consistentHashBalancer) UpdateSubConnState(sc balancer.SubConn, state balancer.SubConnState) {
 	s := state.ConnectivityState
+	// Actually the scInfosLock is used to make sure the delete in reset will execute before the query here, to directly return from the function if the SubConn state changes because of reset.
+	c.scInfosLock.RLock()
 	oldInfo, ok := c.scInfos[sc]
+	c.scInfosLock.RUnlock()
 	if !ok {
 		return
 	}
@@ -182,6 +190,7 @@ func (c *consistentHashBalancer) UpdateSubConnState(sc balancer.SubConn, state b
 	if oldS == connectivity.TransientFailure && s == connectivity.Connecting {
 		return
 	}
+	c.scInfosLock.Lock()
 	c.scInfos[sc].state = s
 	switch s {
 	case connectivity.Idle:
@@ -191,6 +200,7 @@ func (c *consistentHashBalancer) UpdateSubConnState(sc balancer.SubConn, state b
 	case connectivity.TransientFailure:
 		c.connErr = state.ConnectionError
 	}
+	c.scInfosLock.Unlock()
 
 	c.state = c.csEvltr.RecordTransition(oldS, s)
 
@@ -215,7 +225,9 @@ func (c *consistentHashBalancer) resetSubConn(sc balancer.SubConn) error {
 }
 
 func (c *consistentHashBalancer) getSubConnAddr(sc balancer.SubConn) (string, error) {
+	c.scInfosLock.RLock()
 	scInfo, ok := c.scInfos[sc]
+	c.scInfosLock.RUnlock()
 	if !ok {
 		return "", SubConnNotFoundError
 	}
@@ -227,6 +239,7 @@ func (c *consistentHashBalancer) resetSubConnWithAddr(addr string) error {
 	if !ok {
 		return SubConnNotFoundError
 	}
+	c.scInfosLock.Lock()
 	delete(c.scInfos, sc)
 	c.cc.RemoveSubConn(sc)
 	newSC, err := c.cc.NewSubConn([]resolver.Address{c.addrInfos[addr]}, balancer.NewSubConnOptions{HealthCheckEnabled: false})
@@ -239,8 +252,9 @@ func (c *consistentHashBalancer) resetSubConnWithAddr(addr string) error {
 		state: connectivity.Idle,
 		addr:  addr,
 	}
+	c.scInfosLock.Unlock()
 	c.regeneratePicker()
-	c.cc.UpdateState(balancer.State{ConnectivityState: connectivity.Ready, Picker: c.picker})
+	c.cc.UpdateState(balancer.State{ConnectivityState: c.state, Picker: c.picker})
 	return nil
 }
 
@@ -249,7 +263,7 @@ func (c *consistentHashBalancer) scManager() {
 		for {
 			pr := <-c.pickResultChan
 			c.pickResults.EnQueue(pr)
-			c.scConnCountLock.Lock()
+			c.scRecordsLock.Lock()
 			sr, ok := c.scRecords[pr.SC]
 			if !ok {
 				c.scRecords[pr.SC] = &scRecord{connectionCount: 0, latestAccess: time.Now()}
@@ -257,7 +271,7 @@ func (c *consistentHashBalancer) scManager() {
 			}
 			sr.connectionCount++
 			sr.latestAccess = time.Now()
-			c.scConnCountLock.Unlock()
+			c.scRecordsLock.Unlock()
 		}
 	}()
 
@@ -270,31 +284,35 @@ func (c *consistentHashBalancer) scManager() {
 			pr := v.(PickResult)
 			select {
 			case <-pr.Ctx.Done():
-				c.scConnCountLock.Lock()
+				c.scRecordsLock.Lock()
 				sr, ok := c.scRecords[pr.SC]
 				if !ok {
 					// never come here
-					c.scConnCountLock.Unlock()
+					c.scRecordsLock.Unlock()
 					break
 				}
 				sr.connectionCount--
-				c.scConnCountLock.Unlock()
+				if sr.connectionCount == 0 {
+					delete(c.scRecords, pr.SC)
+					c.resetSubConn(pr.SC)
+				}
+				c.scRecordsLock.Unlock()
 			default:
 				c.pickResults.EnQueue(pr)
 			}
 		}
 	}()
 
-	go func() {
-		for {
-			for sc, sr := range c.scRecords {
-				if sr.connectionCount == 0 && sr.latestAccess.Add(time.Second).Before(time.Now()) {
-					c.resetSubConn(sc)
-					c.scConnCountLock.Lock()
-					delete(c.scRecords, sc)
-					c.scConnCountLock.Unlock()
-				}
-			}
-		}
-	}()
+	//go func() {
+	//	for {
+	//		for sc, sr := range c.scRecords {
+	//			if sr.connectionCount == 0 {
+	//				c.resetSubConn(sc)
+	//				c.scRecordsLock.Lock()
+	//				delete(c.scRecords, sc)
+	//				c.scRecordsLock.Unlock()
+	//			}
+	//		}
+	//	}
+	//}()
 }

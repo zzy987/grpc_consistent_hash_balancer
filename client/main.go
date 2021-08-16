@@ -53,7 +53,7 @@ func makeRPCs(cc *grpc.ClientConn, n int) {
 	hwc := rpc.NewEchoClient(cc)
 	for i := 0; i < n; i++ {
 		callUnaryEcho(hwc, "this is examples/load_balancing")
-		time.Sleep(time.Second * 2)
+		//time.Sleep(time.Second * 2)
 	}
 }
 
