@@ -50,6 +50,7 @@ func NewConsistentHashPickerWithReportChan(subConns map[string]balancer.SubConn,
 func (p *consistentHashPicker) Pick(info balancer.PickInfo) (balancer.PickResult, error) {
 	var ret balancer.PickResult
 	if key, ok := info.Ctx.Value(Key).(string); ok {
+		log.Printf("pick for key %s\n", key)
 		if targetAddr, ok := p.hashRing.GetNode(key); ok {
 			ret.SubConn = p.subConns[targetAddr]
 			if p.needReport {

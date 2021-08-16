@@ -33,13 +33,14 @@ func unaryInterceptor(ctx context.Context, method string, req, reply interface{}
 		if err == nil {
 			break
 		}
-		log.Println("interceptor get error")
 	}
 	return err
 }
 
 func callUnaryEcho(c rpc.EchoClient, message string) {
-	ctx, cancel := context.WithTimeout(context.WithValue(context.Background(), balancer.Key, fmt.Sprintf("%d", rand.Int63())), time.Minute)
+	key := fmt.Sprintf("%d", rand.Int63())
+	log.Printf("call for key %s\n", key)
+	ctx, cancel := context.WithTimeout(context.WithValue(context.Background(), balancer.Key, key), time.Minute)
 	defer cancel()
 	r, err := c.UnaryEcho(ctx, &rpc.EchoRequest{Message: message})
 	if err != nil {

@@ -248,7 +248,6 @@ func (c *consistentHashBalancer) scManager() {
 	go func() {
 		for {
 			pr := <-c.pickResultChan
-			log.Printf("Get pick result\n")
 			c.pickResults.EnQueue(pr)
 			c.scConnCountLock.Lock()
 			sr, ok := c.scRecords[pr.SC]
@@ -275,6 +274,7 @@ func (c *consistentHashBalancer) scManager() {
 				sr, ok := c.scRecords[pr.SC]
 				if !ok {
 					// never come here
+					c.scConnCountLock.Unlock()
 					break
 				}
 				sr.connectionCount--
