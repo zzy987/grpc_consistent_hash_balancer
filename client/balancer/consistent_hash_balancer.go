@@ -6,6 +6,7 @@ import (
 	"grpc_consistent_hash_balancer/util"
 	"log"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"google.golang.org/grpc/balancer"
@@ -55,7 +56,7 @@ type subConnInfo struct {
 
 type scRecord struct {
 	latestAccess    time.Time
-	connectionCount int
+	connectionCount int32
 }
 
 // consistentHashBalancer is modified from baseBalancer, you can refer to https://github.com/grpc/grpc-go/blob/master/balancer/base/balancer.go
@@ -103,7 +104,7 @@ func (c *consistentHashBalancer) UpdateClientConnState(s balancer.ClientConnStat
 			}
 			//newSC.Connect()
 
-			// The next three lines is a way to cheat grpc.
+			// The next three lines in comment is a way to cheat grpc.
 			//c.ccCheater.Do(func() {
 			//	newSC.Connect()
 			//})
@@ -269,7 +270,7 @@ func (c *consistentHashBalancer) scManager() {
 				c.scRecords[pr.SC] = &scRecord{connectionCount: 0, latestAccess: time.Now()}
 				sr = c.scRecords[pr.SC]
 			}
-			sr.connectionCount++
+			atomic.AddInt32(&sr.connectionCount, 1)
 			sr.latestAccess = time.Now()
 			c.scRecordsLock.Unlock()
 		}
@@ -287,11 +288,10 @@ func (c *consistentHashBalancer) scManager() {
 				c.scRecordsLock.Lock()
 				sr, ok := c.scRecords[pr.SC]
 				if !ok {
-					// never come here
 					c.scRecordsLock.Unlock()
 					break
 				}
-				sr.connectionCount--
+				atomic.AddInt32(&sr.connectionCount, -1)
 				if sr.connectionCount == 0 {
 					delete(c.scRecords, pr.SC)
 					c.resetSubConn(pr.SC)
