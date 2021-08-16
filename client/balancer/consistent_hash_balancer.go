@@ -1,13 +1,22 @@
 package balancer
 
+import "C"
 import (
 	"fmt"
+	"grpc_consistent_hash_balancer/util"
 	"log"
+	"sync"
+	"time"
 
 	"google.golang.org/grpc/balancer"
 	"google.golang.org/grpc/balancer/base"
 	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/resolver"
+)
+
+var (
+	SubConnNotFoundError  = fmt.Errorf("SubConn not found")
+	ResetSubConnFailError = fmt.Errorf("reset SubConn fail")
 )
 
 func RegisterConsistentHashBalancerBuilder() {
@@ -21,12 +30,18 @@ func newConsistentHashBalancerBuilder() balancer.Builder {
 type consistentHashBalancerBuilder struct{}
 
 func (c *consistentHashBalancerBuilder) Build(cc balancer.ClientConn, opts balancer.BuildOptions) balancer.Balancer {
-	return &consistentHashBalancer{
-		cc:       cc,
-		subConns: make(map[string]balancer.SubConn),
-		scInfos:  make(map[balancer.SubConn]*subConnInfo),
-		csEvltr:  &balancer.ConnectivityStateEvaluator{},
+	b := &consistentHashBalancer{
+		cc:             cc,
+		addrInfos:      make(map[string]resolver.Address),
+		subConns:       make(map[string]balancer.SubConn),
+		scInfos:        make(map[balancer.SubConn]*subConnInfo),
+		csEvltr:        &balancer.ConnectivityStateEvaluator{},
+		pickResultChan: make(chan PickResult),
+		pickResults:    util.NewQueue(),
+		scRecords:      make(map[balancer.SubConn]*scRecord),
 	}
+	go b.scManager()
+	return b
 }
 
 func (c *consistentHashBalancerBuilder) Name() string {
@@ -36,6 +51,11 @@ func (c *consistentHashBalancerBuilder) Name() string {
 type subConnInfo struct {
 	state connectivity.State
 	addr  string
+}
+
+type scRecord struct {
+	latestAccess    time.Time
+	connectionCount int
 }
 
 // consistentHashBalancer is modified from baseBalancer, you can refer to https://github.com/grpc/grpc-go/blob/master/balancer/base/balancer.go
@@ -53,6 +73,11 @@ type consistentHashBalancer struct {
 
 	resolverErr error // the last error reported by the resolver; cleared on successful resolution
 	connErr     error // the last connection error; cleared upon leaving TransientFailure
+
+	pickResultChan  chan PickResult
+	pickResults     *util.Queue
+	scRecords       map[balancer.SubConn]*scRecord
+	scConnCountLock sync.Mutex
 }
 
 func (c *consistentHashBalancer) UpdateClientConnState(s balancer.ClientConnState) error {
@@ -75,7 +100,7 @@ func (c *consistentHashBalancer) UpdateClientConnState(s balancer.ClientConnStat
 			}
 			//newSC.Connect()
 
-			// The next three lines is a way to cheat grpc. See line 99-100 for more details.
+			// The next three lines is a way to cheat grpc.
 			//c.ccCheater.Do(func() {
 			//	newSC.Connect()
 			//})
@@ -133,7 +158,7 @@ func (c *consistentHashBalancer) regeneratePicker() {
 			readySCs[addr] = sc
 		}
 	}
-	c.picker = NewConsistentHashPicker(readySCs)
+	c.picker = NewConsistentHashPickerWithReportChan(readySCs, c.pickResultChan)
 }
 
 func (c *consistentHashBalancer) mergeErrors() error {
@@ -179,27 +204,35 @@ func (c *consistentHashBalancer) UpdateSubConnState(sc balancer.SubConn, state b
 
 func (c *consistentHashBalancer) Close() {}
 
-// TODO change return type from bool to error
-func (c *consistentHashBalancer) getSubConnAddr(sc balancer.SubConn) (string, bool) {
-	scInfo, ok := c.scInfos[sc]
-	if !ok {
-		return "", ok
+func (c *consistentHashBalancer) resetSubConn(sc balancer.SubConn) error {
+	addr, err := c.getSubConnAddr(sc)
+	if err != nil {
+		return err
 	}
-	return scInfo.addr, ok
+	log.Printf("Reset connect with addr %s", addr)
+	err = c.resetSubConnWithAddr(addr)
+	return err
 }
 
-// TODO change return type from bool to error
-func (c *consistentHashBalancer) resetSubConnWithAddr(addr string) bool {
+func (c *consistentHashBalancer) getSubConnAddr(sc balancer.SubConn) (string, error) {
+	scInfo, ok := c.scInfos[sc]
+	if !ok {
+		return "", SubConnNotFoundError
+	}
+	return scInfo.addr, nil
+}
+
+func (c *consistentHashBalancer) resetSubConnWithAddr(addr string) error {
 	sc, ok := c.subConns[addr]
 	if !ok {
-		return ok
+		return SubConnNotFoundError
 	}
 	delete(c.scInfos, sc)
 	c.cc.RemoveSubConn(sc)
 	newSC, err := c.cc.NewSubConn([]resolver.Address{c.addrInfos[addr]}, balancer.NewSubConnOptions{HealthCheckEnabled: false})
 	if err != nil {
 		log.Printf("Consistent Hash Balancer: failed to create new SubConn: %v", err)
-		return false
+		return ResetSubConnFailError
 	}
 	c.subConns[addr] = newSC
 	c.scInfos[newSC] = &subConnInfo{
@@ -207,5 +240,61 @@ func (c *consistentHashBalancer) resetSubConnWithAddr(addr string) bool {
 		addr:  addr,
 	}
 	c.regeneratePicker()
-	return true
+	c.cc.UpdateState(balancer.State{ConnectivityState: connectivity.Ready, Picker: c.picker})
+	return nil
+}
+
+func (c *consistentHashBalancer) scManager() {
+	go func() {
+		for {
+			pr := <-c.pickResultChan
+			log.Printf("Get pick result\n")
+			c.pickResults.EnQueue(pr)
+			c.scConnCountLock.Lock()
+			sr, ok := c.scRecords[pr.SC]
+			if !ok {
+				c.scRecords[pr.SC] = &scRecord{connectionCount: 0, latestAccess: time.Now()}
+				sr = c.scRecords[pr.SC]
+			}
+			sr.connectionCount++
+			sr.latestAccess = time.Now()
+			c.scConnCountLock.Unlock()
+		}
+	}()
+
+	go func() {
+		for {
+			v, ok := c.pickResults.DeQueue()
+			if !ok {
+				continue
+			}
+			pr := v.(PickResult)
+			select {
+			case <-pr.Ctx.Done():
+				c.scConnCountLock.Lock()
+				sr, ok := c.scRecords[pr.SC]
+				if !ok {
+					// never come here
+					break
+				}
+				sr.connectionCount--
+				c.scConnCountLock.Unlock()
+			default:
+				c.pickResults.EnQueue(pr)
+			}
+		}
+	}()
+
+	go func() {
+		for {
+			for sc, sr := range c.scRecords {
+				if sr.connectionCount == 0 && sr.latestAccess.Add(time.Second).Before(time.Now()) {
+					c.resetSubConn(sc)
+					c.scConnCountLock.Lock()
+					delete(c.scRecords, sc)
+					c.scConnCountLock.Unlock()
+				}
+			}
+		}
+	}()
 }

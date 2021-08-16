@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
-	"grpc_capsulation/rpc"
+	"grpc_consistent_hash_balancer/rpc"
 	"log"
 	"net"
 	"sync"

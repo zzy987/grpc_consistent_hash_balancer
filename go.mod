@@ -1,4 +1,4 @@
-module grpc_capsulation
+module grpc_consistent_hash_balancer
 
 go 1.16
 

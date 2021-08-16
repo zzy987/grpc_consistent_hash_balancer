@@ -3,8 +3,8 @@ package main
 import (
 	"context"
 	"fmt"
-	"grpc_capsulation/client/balancer"
-	"grpc_capsulation/rpc"
+	"grpc_consistent_hash_balancer/client/balancer"
+	"grpc_consistent_hash_balancer/rpc"
 	"log"
 	"math/rand"
 	"time"
@@ -23,6 +23,7 @@ var (
 		"loadBalancingPolicy": "%s"
 	}`, balancer.Policy)
 	addrs = []string{"localhost:50000", "localhost:50001", "localhost:50002"}
+	//addrs = []string{"localhost:50000"}
 )
 
 func unaryInterceptor(ctx context.Context, method string, req, reply interface{}, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
@@ -51,6 +52,7 @@ func makeRPCs(cc *grpc.ClientConn, n int) {
 	hwc := rpc.NewEchoClient(cc)
 	for i := 0; i < n; i++ {
 		callUnaryEcho(hwc, "this is examples/load_balancing")
+		time.Sleep(time.Second * 2)
 	}
 }
 
