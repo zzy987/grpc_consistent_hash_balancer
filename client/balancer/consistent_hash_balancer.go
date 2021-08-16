@@ -2,12 +2,12 @@ package balancer
 
 import "C"
 import (
+	"context"
 	"fmt"
 	"grpc_consistent_hash_balancer/util"
 	"log"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	"google.golang.org/grpc/balancer"
 	"google.golang.org/grpc/balancer/base"
@@ -39,7 +39,7 @@ func (c *consistentHashBalancerBuilder) Build(cc balancer.ClientConn, opts balan
 		csEvltr:        &balancer.ConnectivityStateEvaluator{},
 		pickResultChan: make(chan PickResult),
 		pickResults:    util.NewQueue(),
-		scRecords:      make(map[balancer.SubConn]*scRecord),
+		scCounts:       make(map[balancer.SubConn]*int32),
 	}
 	go b.scManager()
 	return b
@@ -52,11 +52,6 @@ func (c *consistentHashBalancerBuilder) Name() string {
 type subConnInfo struct {
 	state connectivity.State
 	addr  string
-}
-
-type scRecord struct {
-	latestAccess    time.Time
-	connectionCount int32
 }
 
 // consistentHashBalancer is modified from baseBalancer, you can refer to https://github.com/grpc/grpc-go/blob/master/balancer/base/balancer.go
@@ -79,8 +74,8 @@ type consistentHashBalancer struct {
 
 	pickResultChan chan PickResult
 	pickResults    *util.Queue
-	scRecords      map[balancer.SubConn]*scRecord
-	scRecordsLock  sync.Mutex
+	scCounts       map[balancer.SubConn]*int32
+	scCountsLock   sync.Mutex
 }
 
 func (c *consistentHashBalancer) UpdateClientConnState(s balancer.ClientConnState) error {
@@ -264,15 +259,17 @@ func (c *consistentHashBalancer) scManager() {
 		for {
 			pr := <-c.pickResultChan
 			c.pickResults.EnQueue(pr)
-			c.scRecordsLock.Lock()
-			sr, ok := c.scRecords[pr.SC]
+			shadowCtx, _ := context.WithTimeout(context.Background(), connectionLifetime)
+			c.pickResults.EnQueue(PickResult{Ctx: shadowCtx, SC: pr.SC})
+			c.scCountsLock.Lock()
+			cnt, ok := c.scCounts[pr.SC]
 			if !ok {
-				c.scRecords[pr.SC] = &scRecord{connectionCount: 0, latestAccess: time.Now()}
-				sr = c.scRecords[pr.SC]
+				cnt = new(int32)
+				*cnt = 0
+				c.scCounts[pr.SC] = cnt
 			}
-			atomic.AddInt32(&sr.connectionCount, 1)
-			sr.latestAccess = time.Now()
-			c.scRecordsLock.Unlock()
+			atomic.AddInt32(cnt, 2)
+			c.scCountsLock.Unlock()
 		}
 	}()
 
@@ -285,34 +282,21 @@ func (c *consistentHashBalancer) scManager() {
 			pr := v.(PickResult)
 			select {
 			case <-pr.Ctx.Done():
-				c.scRecordsLock.Lock()
-				sr, ok := c.scRecords[pr.SC]
+				c.scCountsLock.Lock()
+				cnt, ok := c.scCounts[pr.SC]
 				if !ok {
-					c.scRecordsLock.Unlock()
+					c.scCountsLock.Unlock()
 					break
 				}
-				atomic.AddInt32(&sr.connectionCount, -1)
-				if sr.connectionCount == 0 {
-					delete(c.scRecords, pr.SC)
+				atomic.AddInt32(cnt, -1)
+				if *cnt == 0 {
+					delete(c.scCounts, pr.SC)
 					c.resetSubConn(pr.SC)
 				}
-				c.scRecordsLock.Unlock()
+				c.scCountsLock.Unlock()
 			default:
 				c.pickResults.EnQueue(pr)
 			}
 		}
 	}()
-
-	//go func() {
-	//	for {
-	//		for sc, sr := range c.scRecords {
-	//			if sr.connectionCount == 0 {
-	//				c.resetSubConn(sc)
-	//				c.scRecordsLock.Lock()
-	//				delete(c.scRecords, sc)
-	//				c.scRecordsLock.Unlock()
-	//			}
-	//		}
-	//	}
-	//}()
 }

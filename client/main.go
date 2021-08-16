@@ -13,9 +13,10 @@ import (
 )
 
 const (
-	scheme      = "demo"
-	serviceName = "grpc.demo.consistent_hash_balancer"
-	maxAttempts = 4
+	scheme                    = "demo"
+	serviceName               = "grpc.demo.consistent_hash_balancer"
+	maxAttempts               = 4
+	durationBetweenTwoRpcCall = time.Second * 2
 )
 
 var (
@@ -53,7 +54,7 @@ func makeRPCs(cc *grpc.ClientConn, n int) {
 	hwc := rpc.NewEchoClient(cc)
 	for i := 0; i < n; i++ {
 		callUnaryEcho(hwc, "this is examples/load_balancing")
-		//time.Sleep(time.Second * 2)
+		time.Sleep(time.Second * 2)
 	}
 }
 
