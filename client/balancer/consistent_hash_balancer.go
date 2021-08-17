@@ -177,7 +177,14 @@ func (c *consistentHashBalancer) regeneratePicker() {
 			readySCs[addr] = sc
 		}
 	}
-	c.picker = NewConsistentHashPickerWithReportChan(readySCs, c.pickResultChan)
+	if c.picker == nil {
+		c.picker = NewConsistentHashPickerWithReportChan(readySCs, c.pickResultChan)
+	} else if cp, ok := c.picker.(*consistentHashPicker); ok {
+		cp.Refresh(c.subConns)
+	} else {
+		c.picker = NewConsistentHashPickerWithReportChan(readySCs, c.pickResultChan)
+	}
+
 }
 
 // mergeErrors is copied from baseBalancer.
