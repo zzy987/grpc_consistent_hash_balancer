@@ -71,11 +71,11 @@ type consistentHashBalancer struct {
 	// state indicates the state of the whole ClientConn from the perspective of the balancer.
 	state connectivity.State
 
-	// addrInfos records complete information corresponding to the address string.
+	// addrInfos maps the address string to resolver.Address.
 	addrInfos map[string]resolver.Address
-	// subConns records the balancer.SubConn corresponding to the address string.
+	// subConns maps the address string to balancer.SubConn.
 	subConns map[string]balancer.SubConn
-	// scInfos records the state and addr corresponding to the SubConn.
+	// scInfos maps the balancer.SubConn to subConnInfo.
 	scInfos map[balancer.SubConn]*subConnInfo
 	// scInfosLock is the lock for the scInfos map.
 	scInfosLock sync.RWMutex
@@ -92,7 +92,7 @@ type consistentHashBalancer struct {
 	pickResultChan chan PickResult
 	// pickResults is the Queue storing PickResult with a undone context, updating asynchronously.
 	pickResults *util.Queue
-	// scCounts records the amount of PickResult with the SubConn in pickResults.
+	// scCounts records the amount of PickResults with the SubConn in pickResults.
 	scCounts map[balancer.SubConn]*int32
 	// scCountsLock is the lock for the scCounts map.
 	scCountsLock sync.Mutex
@@ -279,8 +279,12 @@ func (c *consistentHashBalancer) resetSubConnWithAddr(addr string) error {
 		addr:  addr,
 	}
 	c.scInfosLock.Unlock()
-	c.regeneratePicker()
-	c.cc.UpdateState(balancer.State{ConnectivityState: c.state, Picker: c.picker})
+	if cp, ok := c.picker.(*consistentHashPicker); ok {
+		cp.ResetAddrSubConn(addr, newSC)
+	} else {
+		c.regeneratePicker()
+		c.cc.UpdateState(balancer.State{ConnectivityState: c.state, Picker: c.picker})
+	}
 	return nil
 }
 
