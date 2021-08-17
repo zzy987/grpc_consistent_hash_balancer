@@ -39,7 +39,7 @@ func (c *consistentHashBalancerBuilder) Build(cc balancer.ClientConn, opts balan
 		cc:             cc,
 		addrInfos:      make(map[string]resolver.Address),
 		subConns:       make(map[string]balancer.SubConn),
-		scInfos:        make(map[balancer.SubConn]*subConnInfo),
+		scInfos:        sync.Map{},
 		csEvltr:        &balancer.ConnectivityStateEvaluator{},
 		pickResultChan: make(chan PickResult),
 		pickResults:    util.NewQueue(),
@@ -76,9 +76,7 @@ type consistentHashBalancer struct {
 	// subConns maps the address string to balancer.SubConn.
 	subConns map[string]balancer.SubConn
 	// scInfos maps the balancer.SubConn to subConnInfo.
-	scInfos map[balancer.SubConn]*subConnInfo
-	// scInfosLock is the lock for the scInfos map.
-	scInfosLock sync.RWMutex
+	scInfos sync.Map
 
 	// picker is a balancer.Picker created by the balancer but used by the ClientConn.
 	picker balancer.Picker
@@ -103,7 +101,6 @@ type consistentHashBalancer struct {
 func (c *consistentHashBalancer) UpdateClientConnState(s balancer.ClientConnState) error {
 	c.resolverErr = nil
 	addrsSet := make(map[string]struct{})
-	c.scInfosLock.Lock()
 	for _, a := range s.ResolverState.Addresses {
 		addr := a.Addr
 		c.addrInfos[addr] = a
@@ -115,10 +112,10 @@ func (c *consistentHashBalancer) UpdateClientConnState(s balancer.ClientConnStat
 				continue
 			}
 			c.subConns[addr] = newSC
-			c.scInfos[newSC] = &subConnInfo{
+			c.scInfos.Store(newSC, &subConnInfo{
 				state: connectivity.Idle,
 				addr:  addr,
-			}
+			})
 			//newSC.Connect()
 
 			// The next three lines in comment is a way to cheat grpc.
@@ -129,7 +126,6 @@ func (c *consistentHashBalancer) UpdateClientConnState(s balancer.ClientConnStat
 			c.cc.UpdateAddresses(sc, []resolver.Address{a})
 		}
 	}
-	c.scInfosLock.Unlock()
 	for a, sc := range c.subConns {
 		if _, ok := addrsSet[a]; !ok {
 			c.cc.RemoveSubConn(sc)
@@ -175,14 +171,12 @@ func (c *consistentHashBalancer) regeneratePicker() {
 		return
 	}
 	readySCs := make(map[string]balancer.SubConn)
-	c.scInfosLock.RLock()
 	for addr, sc := range c.subConns {
 		// The next line may not be safe, but we have to use subConns without check, for we didn't set up connections in function UpdateClientConnState.
-		if st, ok := c.scInfos[sc]; ok && st.state != connectivity.Shutdown {
+		if st, ok := c.scInfos.Load(sc); ok && st.(*subConnInfo).state != connectivity.Shutdown {
 			readySCs[addr] = sc
 		}
 	}
-	c.scInfosLock.RUnlock()
 	c.picker = NewConsistentHashPickerWithReportChan(readySCs, c.pickResultChan)
 }
 
@@ -200,29 +194,29 @@ func (c *consistentHashBalancer) mergeErrors() error {
 // UpdateSubConnState is implemented by balancer.Balancer, modified from baseBalancer
 func (c *consistentHashBalancer) UpdateSubConnState(sc balancer.SubConn, state balancer.SubConnState) {
 	s := state.ConnectivityState
-	// Actually the scInfosLock is used to make sure the delete in reset will execute before the query here, to directly return from the function if the SubConn state changes because of reset.
-	c.scInfosLock.RLock()
-	oldInfo, ok := c.scInfos[sc]
-	c.scInfosLock.RUnlock()
+	// make sure the delete in reset will execute before the query here, to directly return from the function if the SubConn state changes because of reset.
+	v, ok := c.scInfos.Load(sc)
 	if !ok {
 		return
 	}
-	oldS := oldInfo.state
+	info, ok := v.(*subConnInfo)
+	if !ok {
+		return
+	}
+	oldS := info.state
 	log.Printf("state of one subConn changed from %s to %s\n", oldS.String(), s.String())
 	if oldS == connectivity.TransientFailure && s == connectivity.Connecting {
 		return
 	}
-	c.scInfosLock.Lock()
-	c.scInfos[sc].state = s
+	info.state = s
 	switch s {
 	case connectivity.Idle:
 		sc.Connect()
 	case connectivity.Shutdown:
-		delete(c.scInfos, sc)
+		c.scInfos.Delete(sc)
 	case connectivity.TransientFailure:
 		c.connErr = state.ConnectionError
 	}
-	c.scInfosLock.Unlock()
 
 	c.state = c.csEvltr.RecordTransition(oldS, s)
 
@@ -250,9 +244,11 @@ func (c *consistentHashBalancer) resetSubConn(sc balancer.SubConn) error {
 
 // getSubConnAddr returns the address string of a SubConn.
 func (c *consistentHashBalancer) getSubConnAddr(sc balancer.SubConn) (string, error) {
-	c.scInfosLock.RLock()
-	scInfo, ok := c.scInfos[sc]
-	c.scInfosLock.RUnlock()
+	v, ok := c.scInfos.Load(sc)
+	if !ok {
+		return "", SubConnNotFoundError
+	}
+	scInfo, ok := v.(*subConnInfo)
 	if !ok {
 		return "", SubConnNotFoundError
 	}
@@ -265,8 +261,7 @@ func (c *consistentHashBalancer) resetSubConnWithAddr(addr string) error {
 	if !ok {
 		return SubConnNotFoundError
 	}
-	c.scInfosLock.Lock()
-	delete(c.scInfos, sc)
+	c.scInfos.Delete(sc)
 	c.cc.RemoveSubConn(sc)
 	newSC, err := c.cc.NewSubConn([]resolver.Address{c.addrInfos[addr]}, balancer.NewSubConnOptions{HealthCheckEnabled: false})
 	if err != nil {
@@ -274,11 +269,10 @@ func (c *consistentHashBalancer) resetSubConnWithAddr(addr string) error {
 		return ResetSubConnFailError
 	}
 	c.subConns[addr] = newSC
-	c.scInfos[newSC] = &subConnInfo{
+	c.scInfos.Store(newSC, &subConnInfo{
 		state: connectivity.Idle,
 		addr:  addr,
-	}
-	c.scInfosLock.Unlock()
+	})
 	if cp, ok := c.picker.(*consistentHashPicker); ok {
 		cp.ResetAddrSubConn(addr, newSC)
 	} else {
