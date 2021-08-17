@@ -199,10 +199,7 @@ func (c *consistentHashBalancer) UpdateSubConnState(sc balancer.SubConn, state b
 	if !ok {
 		return
 	}
-	info, ok := v.(*subConnInfo)
-	if !ok {
-		return
-	}
+	info := v.(*subConnInfo)
 	oldS := info.state
 	log.Printf("state of one subConn changed from %s to %s\n", oldS.String(), s.String())
 	if oldS == connectivity.TransientFailure && s == connectivity.Connecting {
@@ -248,11 +245,7 @@ func (c *consistentHashBalancer) getSubConnAddr(sc balancer.SubConn) (string, er
 	if !ok {
 		return "", SubConnNotFoundError
 	}
-	scInfo, ok := v.(*subConnInfo)
-	if !ok {
-		return "", SubConnNotFoundError
-	}
-	return scInfo.addr, nil
+	return v.(*subConnInfo).addr, nil
 }
 
 // resetSubConnWithAddr creates a new idle SubConn for the address string, and remove the old one.
