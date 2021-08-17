@@ -16,7 +16,7 @@ const (
 	scheme                    = "demo"
 	serviceName               = "grpc.demo.consistent_hash_balancer"
 	maxAttempts               = 4
-	durationBetweenTwoRpcCall = time.Second * 2
+	durationBetweenTwoRpcCall = time.Duration(0)
 )
 
 var (
