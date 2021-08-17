@@ -20,16 +20,20 @@ var (
 	ResetSubConnFailError = fmt.Errorf("reset SubConn fail")
 )
 
+// RegisterConsistentHashBalancerBuilder register a consistentHashBalancerBuilder to balancer package in grpc.
 func RegisterConsistentHashBalancerBuilder() {
 	balancer.Register(newConsistentHashBalancerBuilder())
 }
 
+// newConsistentHashBalancerBuilder returns a consistentHashBalancerBuilder.
 func newConsistentHashBalancerBuilder() balancer.Builder {
 	return &consistentHashBalancerBuilder{}
 }
 
+// consistentHashBalancerBuilder is a empty struct with functions Build and Name, implemented from balancer.Builder
 type consistentHashBalancerBuilder struct{}
 
+// Build creates a consistentHashBalancer, and starts its scManager.
 func (c *consistentHashBalancerBuilder) Build(cc balancer.ClientConn, opts balancer.BuildOptions) balancer.Balancer {
 	b := &consistentHashBalancer{
 		cc:             cc,
@@ -45,10 +49,12 @@ func (c *consistentHashBalancerBuilder) Build(cc balancer.ClientConn, opts balan
 	return b
 }
 
+// Name returns the name of the consistentHashBalancer registering in grpc.
 func (c *consistentHashBalancerBuilder) Name() string {
 	return Policy
 }
 
+// subConnInfo records the state and addr corresponding to the SubConn.
 type subConnInfo struct {
 	state connectivity.State
 	addr  string
@@ -56,28 +62,44 @@ type subConnInfo struct {
 
 // consistentHashBalancer is modified from baseBalancer, you can refer to https://github.com/grpc/grpc-go/blob/master/balancer/base/balancer.go
 type consistentHashBalancer struct {
+	// cc points to the balancer.ClientConn who creates the consistentHashBalancer.
 	cc balancer.ClientConn
 	//ccCheater sync.Once
 
+	// csEvltr appears in baseBalancer, I don't know much about it.
 	csEvltr *balancer.ConnectivityStateEvaluator
-	state   connectivity.State
+	// state indicates the state of the whole ClientConn from the perspective of the balancer.
+	state connectivity.State
 
-	addrInfos   map[string]resolver.Address
-	subConns    map[string]balancer.SubConn
-	scInfos     map[balancer.SubConn]*subConnInfo
+	// addrInfos records complete information corresponding to the address string.
+	addrInfos map[string]resolver.Address
+	// subConns records the balancer.SubConn corresponding to the address string.
+	subConns map[string]balancer.SubConn
+	// scInfos records the state and addr corresponding to the SubConn.
+	scInfos map[balancer.SubConn]*subConnInfo
+	// scInfosLock is the lock for the scInfos map.
 	scInfosLock sync.RWMutex
 
+	// picker is a balancer.Picker created by the balancer but used by the ClientConn.
 	picker balancer.Picker
 
-	resolverErr error // the last error reported by the resolver; cleared on successful resolution
-	connErr     error // the last connection error; cleared upon leaving TransientFailure
+	// resolverErr is the last error reported by the resolver; cleared on successful resolution.
+	resolverErr error
+	// connErr is the last connection error; cleared upon leaving TransientFailure
+	connErr error
 
+	// pickResultChan is the channel for the picker to report PickResult to the balancer.
 	pickResultChan chan PickResult
-	pickResults    *util.Queue
-	scCounts       map[balancer.SubConn]*int32
-	scCountsLock   sync.Mutex
+	// pickResults is the Queue storing PickResult with a undone context, updating asynchronously.
+	pickResults *util.Queue
+	// scCounts records the amount of PickResult with the SubConn in pickResults.
+	scCounts map[balancer.SubConn]*int32
+	// scCountsLock is the lock for the scCounts map.
+	scCountsLock sync.Mutex
 }
 
+// UpdateClientConnState is implemented from balancer.Balancer, modified from the baseBalancer,
+// ClientConn will call it after Builder builds the balancer to pass the necessary data.
 func (c *consistentHashBalancer) UpdateClientConnState(s balancer.ClientConnState) error {
 	c.resolverErr = nil
 	addrsSet := make(map[string]struct{})
@@ -127,6 +149,7 @@ func (c *consistentHashBalancer) UpdateClientConnState(s balancer.ClientConnStat
 	return nil
 }
 
+// ResolverError is implemented from balancer.Balancer, copied from baseBalancer.
 func (c *consistentHashBalancer) ResolverError(err error) {
 	c.resolverErr = err
 	if len(c.subConns) == 0 {
@@ -145,6 +168,7 @@ func (c *consistentHashBalancer) ResolverError(err error) {
 	})
 }
 
+// regeneratePicker generates a new picker to replace the old one with new data.
 func (c *consistentHashBalancer) regeneratePicker() {
 	if c.state == connectivity.TransientFailure {
 		c.picker = base.NewErrPicker(c.mergeErrors())
@@ -162,6 +186,7 @@ func (c *consistentHashBalancer) regeneratePicker() {
 	c.picker = NewConsistentHashPickerWithReportChan(readySCs, c.pickResultChan)
 }
 
+// mergeErrors is copied from baseBalancer.
 func (c *consistentHashBalancer) mergeErrors() error {
 	if c.connErr == nil {
 		return fmt.Errorf("last resolver error: %v", c.resolverErr)
@@ -172,6 +197,7 @@ func (c *consistentHashBalancer) mergeErrors() error {
 	return fmt.Errorf("last connection error: %v; last resolver error: %v", c.connErr, c.resolverErr)
 }
 
+// UpdateSubConnState is implemented by balancer.Balancer, modified from baseBalancer
 func (c *consistentHashBalancer) UpdateSubConnState(sc balancer.SubConn, state balancer.SubConnState) {
 	s := state.ConnectivityState
 	// Actually the scInfosLock is used to make sure the delete in reset will execute before the query here, to directly return from the function if the SubConn state changes because of reset.
@@ -208,8 +234,10 @@ func (c *consistentHashBalancer) UpdateSubConnState(sc balancer.SubConn, state b
 	c.cc.UpdateState(balancer.State{ConnectivityState: c.state, Picker: c.picker})
 }
 
+// Close is implemented by balancer.Balancer, copied from baseBalancer.
 func (c *consistentHashBalancer) Close() {}
 
+// resetSubConn will replace a SubConn with a new idle SubConn.
 func (c *consistentHashBalancer) resetSubConn(sc balancer.SubConn) error {
 	addr, err := c.getSubConnAddr(sc)
 	if err != nil {
@@ -220,6 +248,7 @@ func (c *consistentHashBalancer) resetSubConn(sc balancer.SubConn) error {
 	return err
 }
 
+// getSubConnAddr returns the address string of a SubConn.
 func (c *consistentHashBalancer) getSubConnAddr(sc balancer.SubConn) (string, error) {
 	c.scInfosLock.RLock()
 	scInfo, ok := c.scInfos[sc]
@@ -230,6 +259,7 @@ func (c *consistentHashBalancer) getSubConnAddr(sc balancer.SubConn) (string, er
 	return scInfo.addr, nil
 }
 
+// resetSubConnWithAddr creates a new idle SubConn for the address string, and remove the old one.
 func (c *consistentHashBalancer) resetSubConnWithAddr(addr string) error {
 	sc, ok := c.subConns[addr]
 	if !ok {
@@ -254,11 +284,13 @@ func (c *consistentHashBalancer) resetSubConnWithAddr(addr string) error {
 	return nil
 }
 
+// scManager launches two goroutines to receive PickResult and query whether the context of the stored PickResult is done.
 func (c *consistentHashBalancer) scManager() {
 	go func() {
 		for {
 			pr := <-c.pickResultChan
 			c.pickResults.EnQueue(pr)
+			// use a shadow context to ensure one of the necessary conditions of calling resetSubConn is that at least a defined time duration has passed since each previous request.
 			shadowCtx, _ := context.WithTimeout(context.Background(), connectionLifetime)
 			c.pickResults.EnQueue(PickResult{Ctx: shadowCtx, SC: pr.SC})
 			c.scCountsLock.Lock()
