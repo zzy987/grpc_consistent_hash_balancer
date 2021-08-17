@@ -73,5 +73,5 @@ func main() {
 	}
 	defer conn.Close()
 
-	makeRPCs(conn, 10)
+	makeRPCs(conn, 100)
 }

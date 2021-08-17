@@ -275,6 +275,7 @@ func (c *consistentHashBalancer) resetSubConnWithAddr(addr string) error {
 	})
 	if cp, ok := c.picker.(*consistentHashPicker); ok {
 		cp.ResetAddrSubConn(addr, newSC)
+		c.cc.UpdateState(balancer.State{ConnectivityState: c.state, Picker: c.picker})
 	} else {
 		c.regeneratePicker()
 		c.cc.UpdateState(balancer.State{ConnectivityState: c.state, Picker: c.picker})
