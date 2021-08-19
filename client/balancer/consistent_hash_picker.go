@@ -54,23 +54,27 @@ func NewConsistentHashPickerWithReportChan(subConns map[string]balancer.SubConn,
 
 func (p *consistentHashPicker) Pick(info balancer.PickInfo) (balancer.PickResult, error) {
 	var ret balancer.PickResult
-	if key, ok := info.Ctx.Value(Key).(string); ok {
-		log.Printf("pick for key %s\n", key)
-		if historyAddr, ok := p.pickHistory.Load(key); ok {
-			ret.SubConn = p.subConns[historyAddr.(string)]
-			if p.needReport {
-				p.reportChan <- PickResult{Ctx: info.Ctx, SC: ret.SubConn}
-			}
-		} else if targetAddr, ok := p.hashRing.GetNode(key); ok {
-			ret.SubConn = p.subConns[targetAddr]
-			p.pickHistory.Store(key, targetAddr)
-			if p.needReport {
-				p.reportChan <- PickResult{Ctx: info.Ctx, SC: ret.SubConn}
-			}
+	key, ok := info.Ctx.Value(Key).(string)
+	if !ok {
+		key = info.FullMethodName
+	}
+	log.Printf("pick for %s\n", key)
+	if historyAddr, ok := p.pickHistory.Load(key); ok {
+		ret.SubConn = p.subConns[historyAddr.(string)]
+		if p.needReport {
+			p.reportChan <- PickResult{Ctx: info.Ctx, SC: ret.SubConn}
+		}
+	} else if targetAddr, ok := p.hashRing.GetNode(key); ok {
+		ret.SubConn = p.subConns[targetAddr]
+		p.pickHistory.Store(key, targetAddr)
+		if p.needReport {
+			p.reportChan <- PickResult{Ctx: info.Ctx, SC: ret.SubConn}
 		}
 	}
 	//ret.SubConn = p.subConns["localhost:50000"]
-	// TODO return err if ret is empty?
+	if ret.SubConn == nil {
+		return ret, balancer.ErrNoSubConnAvailable
+	}
 	return ret, nil
 }
 

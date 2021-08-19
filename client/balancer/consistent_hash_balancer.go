@@ -123,6 +123,7 @@ func (c *consistentHashBalancer) UpdateClientConnState(s balancer.ClientConnStat
 			//	newSC.Connect()
 			//})
 		} else {
+			// TODO why
 			c.cc.UpdateAddresses(sc, []resolver.Address{a})
 		}
 	}
