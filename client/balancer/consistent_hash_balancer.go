@@ -332,6 +332,7 @@ func (c *consistentHashBalancer) scManager() {
 
 	// The second goroutine checks the pickResults in the queue. if the context of a pickResult is done, it will drop the pickResults.
 	// It will reset a SubConn when there is no pickResults with the SubConn after dropped one.
+	// Oh no, TODO what if the picker picks the SubConn is resetting?
 	go func() {
 		for {
 			v, ok := c.pickResults.DeQueue()
