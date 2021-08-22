@@ -116,6 +116,20 @@ func (c *consistentHashBalancer) UpdateClientConnState(s balancer.ClientConnStat
 				state: connectivity.Idle,
 				addr:  addr,
 			})
+			// newSC.Connect() -> acBalancerWrapper.Connect() -> addrConn.connect() -> addrConn.updateConnectivityState()
+			// -> ClientConn.handleSubConnStateChange() -> ccBalancerWrapper.handleSubConnStateChange()
+			// -> ccBalancerWrapper.updateCh.Put() -> ccBalancerWrapper.watcher() -> balancer.UpdateSubConnState(),
+			// and UpdateSubConnState calls ClientConn.UpdateState() at last.
+			// And when a connection is ready, it will enter balancer.UpdateSubConnState(), too,
+			// and the picker will be generated at the first time in the design of the baseBalancer.
+
+			// PickerWrapper will block if the picker is nil, or the picker.Pick returns a bad SubConn,
+			// and it will be unblocked when ClientConn.UpdateState() is called.
+			// Because we do not connect here, grpc will not enter UpdateSubConn or other functions that will call ClientConn.UpdateState() with a picker.
+			// and the programme will be blocked by the pickerWrapper permanently.
+			// We should use another way to achieve ClientConn.UpdateState() with a picker before the first pick,
+			// for example, I call ClientConn.UpdateState() directly.
+
 			//newSC.Connect()
 
 			// The next three lines in comment is a way to cheat grpc.
@@ -123,7 +137,6 @@ func (c *consistentHashBalancer) UpdateClientConnState(s balancer.ClientConnStat
 			//	newSC.Connect()
 			//})
 		} else {
-			// TODO why
 			c.cc.UpdateAddresses(sc, []resolver.Address{a})
 		}
 	}
@@ -140,7 +153,10 @@ func (c *consistentHashBalancer) UpdateClientConnState(s balancer.ClientConnStat
 
 	// As we want to do the connection management ourselves, we don't set up connection here.
 	// Connection has not been ready yet. The next two lines is a trick aims to make grpc continue executing.
+	// if the picker is nil in ClientConn, it will block at next pick in pickerWrapper,
+	// So I have to generate the picker first.
 	c.regeneratePicker()
+	// I call ClientConn.UpdateState() directly.
 	c.cc.UpdateState(balancer.State{ConnectivityState: connectivity.Ready, Picker: c.picker})
 
 	return nil
@@ -173,19 +189,22 @@ func (c *consistentHashBalancer) regeneratePicker() {
 	}
 	readySCs := make(map[string]balancer.SubConn)
 	for addr, sc := range c.subConns {
-		// The next line may not be safe, but we have to use subConns without check, for we didn't set up connections in function UpdateClientConnState.
-		if st, ok := c.scInfos.Load(sc); ok && st.(*subConnInfo).state != connectivity.Shutdown {
+		// The next line may not be safe, but we have to use subConns without check,
+		// for we have not set up connections with any SubConn, all of them are Idle.
+		if st, ok := c.scInfos.Load(sc); ok && st.(*subConnInfo).state != connectivity.Shutdown && st.(*subConnInfo).state != connectivity.TransientFailure {
 			readySCs[addr] = sc
 		}
 	}
 	if c.picker == nil {
+		// Create one if picker is nil
 		c.picker = NewConsistentHashPickerWithReportChan(readySCs, c.pickResultChan)
 	} else if cp, ok := c.picker.(*consistentHashPicker); ok {
+		// or refresh the picker, for we want the picker to hold the pickHistory.
 		cp.Refresh(c.subConns)
 	} else {
+		// This may not happen in my demo.
 		c.picker = NewConsistentHashPickerWithReportChan(readySCs, c.pickResultChan)
 	}
-
 }
 
 // mergeErrors is copied from baseBalancer.
@@ -202,7 +221,6 @@ func (c *consistentHashBalancer) mergeErrors() error {
 // UpdateSubConnState is implemented by balancer.Balancer, modified from baseBalancer
 func (c *consistentHashBalancer) UpdateSubConnState(sc balancer.SubConn, state balancer.SubConnState) {
 	s := state.ConnectivityState
-	// make sure the delete in reset will execute before the query here, to directly return from the function if the SubConn state changes because of reset.
 	v, ok := c.scInfos.Load(sc)
 	if !ok {
 		return
@@ -216,6 +234,7 @@ func (c *consistentHashBalancer) UpdateSubConnState(sc balancer.SubConn, state b
 	info.state = s
 	switch s {
 	case connectivity.Idle:
+		// I do not know when it will come here.
 		sc.Connect()
 	case connectivity.Shutdown:
 		c.scInfos.Delete(sc)
@@ -225,6 +244,7 @@ func (c *consistentHashBalancer) UpdateSubConnState(sc balancer.SubConn, state b
 
 	c.state = c.csEvltr.RecordTransition(oldS, s)
 
+	// It seems like this if expression can be removed.
 	if (s == connectivity.Ready) != (oldS == connectivity.Ready) ||
 		c.state == connectivity.TransientFailure {
 		c.regeneratePicker()
@@ -286,11 +306,15 @@ func (c *consistentHashBalancer) resetSubConnWithAddr(addr string) error {
 
 // scManager launches two goroutines to receive PickResult and query whether the context of the stored PickResult is done.
 func (c *consistentHashBalancer) scManager() {
+	// The first goroutine listens to the pickResultChan, put pickResults into a queue.
+	// Because the second go routine will reset a SubConn if there is no pickResult with the SubConn in the queue,
+	// and we want to hold a SubConn for a while to reuse it, I use a "shadow context" with timeout to achieve both.
 	go func() {
 		for {
 			pr := <-c.pickResultChan
 			c.pickResults.EnQueue(pr)
-			// use a shadow context to ensure one of the necessary conditions of calling resetSubConn is that at least a defined time duration has passed since each previous request.
+			// Use a shadow context to ensure one of the necessary conditions of calling resetSubConn is that at least a defined time duration has passed since each previous request.
+			// This trick can reduce a goroutine traversing the entire map and compare time.Now() and the recorded expired time.
 			shadowCtx, _ := context.WithTimeout(context.Background(), connectionLifetime)
 			c.pickResults.EnQueue(PickResult{Ctx: shadowCtx, SC: pr.SC})
 			c.scCountsLock.Lock()
@@ -300,11 +324,14 @@ func (c *consistentHashBalancer) scManager() {
 				*cnt = 0
 				c.scCounts[pr.SC] = cnt
 			}
+			// I want to use sync.map to replace the map scCounts, so I use atomic. But I find it (the replacement) is not easy...
 			atomic.AddInt32(cnt, 2)
 			c.scCountsLock.Unlock()
 		}
 	}()
 
+	// The second goroutine checks the pickResults in the queue. if the context of a pickResult is done, it will drop the pickResults.
+	// It will reset a SubConn when there is no pickResults with the SubConn after dropped one.
 	go func() {
 		for {
 			v, ok := c.pickResults.DeQueue()

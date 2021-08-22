@@ -23,8 +23,6 @@ var (
 	grpcServicePolicy = fmt.Sprintf(`{
 		"loadBalancingPolicy": "%s"
 	}`, balancer.Policy)
-	addrs = []string{"localhost:50000", "localhost:50001", "localhost:50002"}
-	//addrs = []string{"localhost:50000"}
 )
 
 func unaryInterceptor(ctx context.Context, method string, req, reply interface{}, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
@@ -41,6 +39,7 @@ func unaryInterceptor(ctx context.Context, method string, req, reply interface{}
 func callUnaryEcho(c rpc.EchoClient, message string) {
 	key := fmt.Sprintf("%d", rand.Int63())
 	log.Printf("call for key %s\n", key)
+	// As the parameters of the pick function are specified by grpc, I have to pass the task_id by context.
 	ctx, cancel := context.WithTimeout(context.WithValue(context.Background(), balancer.Key, key), time.Minute)
 	defer cancel()
 	r, err := c.UnaryEcho(ctx, &rpc.EchoRequest{Message: message})
@@ -60,6 +59,7 @@ func makeRPCs(cc *grpc.ClientConn, n int) {
 
 func main() {
 	rand.Seed(time.Now().Unix())
+	// call balancer.RegisterConsistentHashBalancerBuilder() to register the balancer at first. Or we can put this in init().
 	balancer.RegisterConsistentHashBalancerBuilder()
 	conn, err := grpc.Dial(
 		fmt.Sprintf("%s:///%s", scheme, serviceName),
