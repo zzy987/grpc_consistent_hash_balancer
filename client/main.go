@@ -59,8 +59,6 @@ func makeRPCs(cc *grpc.ClientConn, n int) {
 
 func main() {
 	rand.Seed(time.Now().Unix())
-	// call balancer.RegisterConsistentHashBalancerBuilder() to register the balancer at first. Or we can put this in init().
-	balancer.RegisterConsistentHashBalancerBuilder()
 	conn, err := grpc.Dial(
 		fmt.Sprintf("%s:///%s", scheme, serviceName),
 		grpc.WithDefaultServiceConfig(grpcServicePolicy),

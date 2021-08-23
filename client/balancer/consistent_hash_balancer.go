@@ -20,8 +20,7 @@ var (
 	ResetSubConnFailError = fmt.Errorf("reset SubConn fail")
 )
 
-// RegisterConsistentHashBalancerBuilder register a consistentHashBalancerBuilder to balancer package in grpc.
-func RegisterConsistentHashBalancerBuilder() {
+func init() {
 	balancer.Register(newConsistentHashBalancerBuilder())
 }
 
