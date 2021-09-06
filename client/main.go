@@ -64,7 +64,6 @@ func main() {
 		grpc.WithDefaultServiceConfig(grpcServicePolicy),
 		grpc.WithInsecure(),
 		grpc.WithUnaryInterceptor(unaryInterceptor),
-		grpc.WithBlock(),
 	)
 	if err != nil {
 		log.Fatalf("did not connect: %v", err)

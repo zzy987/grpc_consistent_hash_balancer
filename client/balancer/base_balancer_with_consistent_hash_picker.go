@@ -6,10 +6,6 @@ import (
 	"google.golang.org/grpc/grpclog"
 )
 
-func RegisterBalancerWithConsistentHashPickerBuilder() {
-	balancer.Register(newBalancerWithConsistentHashPickerBuilder())
-}
-
 func newBalancerWithConsistentHashPickerBuilder() balancer.Builder {
 	return base.NewBalancerBuilder(Policy,
 		&consistentHashPickerBuilder{},
