@@ -7,6 +7,7 @@ import (
 	"log"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"google.golang.org/grpc/balancer"
 	"google.golang.org/grpc/balancer/base"
@@ -114,6 +115,8 @@ func (c *consistentHashBalancer) UpdateClientConnState(s balancer.ClientConnStat
 				state: connectivity.Idle,
 				addr:  addr,
 			})
+			// newSC.Connect()
+
 			// newSC.Connect() -> acBalancerWrapper.Connect() -> addrConn.connect() -> addrConn.updateConnectivityState()
 			// -> ClientConn.handleSubConnStateChange() -> ccBalancerWrapper.handleSubConnStateChange()
 			// -> ccBalancerWrapper.updateCh.Put() -> ccBalancerWrapper.watcher() -> balancer.UpdateSubConnState(),
@@ -127,13 +130,6 @@ func (c *consistentHashBalancer) UpdateClientConnState(s balancer.ClientConnStat
 			// and the programme will be blocked by the pickerWrapper permanently.
 			// We should use another way to achieve ClientConn.UpdateState() with a picker before the first pick,
 			// for example, I call ClientConn.UpdateState() directly.
-
-			//newSC.Connect()
-
-			// The next three lines in comment is a way to cheat grpc.
-			//c.ccCheater.Do(func() {
-			//	newSC.Connect()
-			//})
 		} else {
 			c.cc.UpdateAddresses(sc, []resolver.Address{a})
 		}
@@ -193,16 +189,7 @@ func (c *consistentHashBalancer) regeneratePicker() {
 			readySCs[addr] = sc
 		}
 	}
-	if c.picker == nil {
-		// Create one if picker is nil
-		c.picker = NewConsistentHashPickerWithReportChan(readySCs, c.pickResultChan)
-	} else if cp, ok := c.picker.(*consistentHashPicker); ok {
-		// or refresh the picker, for we want the picker to hold the pickHistory.
-		cp.Refresh(c.subConns)
-	} else {
-		// This may not happen in my demo.
-		c.picker = NewConsistentHashPickerWithReportChan(readySCs, c.pickResultChan)
-	}
+	c.picker = NewConsistentHashPickerWithReportChan(readySCs, c.pickResultChan)
 }
 
 // mergeErrors is copied from baseBalancer.
@@ -335,6 +322,7 @@ func (c *consistentHashBalancer) scManager() {
 		for {
 			v, ok := c.pickResults.DeQueue()
 			if !ok {
+				time.Sleep(connectionLifetime)
 				continue
 			}
 			pr := v.(PickResult)

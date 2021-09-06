@@ -1,8 +1,6 @@
 package main
 
 import (
-	"log"
-
 	"google.golang.org/grpc/resolver"
 )
 
@@ -12,7 +10,7 @@ import (
 var (
 	// Resolver exposes the resolver we give to grpc, for updating address conveniently.
 	Resolver *exampleResolver
-	addrs = []string{"localhost:50000", "localhost:50001", "localhost:50002"}
+	addrs    = []string{"localhost:50000", "localhost:50001", "localhost:50002"}
 	//addrs = []string{"localhost:50000"}
 )
 
@@ -27,11 +25,8 @@ func (*exampleResolverBuilder) Build(target resolver.Target, cc resolver.ClientC
 	Resolver = &exampleResolver{
 		target: target,
 		cc:     cc,
-		// addrsUpdateChan can be blocked
-		addrsUpdateChan: make(chan []string, 1),
 	}
-	Resolver.addrsUpdateChan <- addrs
-	go Resolver.start()
+	Resolver.UpdateAddrs(addrs)
 	return Resolver, nil
 }
 
@@ -41,34 +36,21 @@ func (*exampleResolverBuilder) Scheme() string { return scheme }
 type exampleResolver struct {
 	target resolver.Target
 	cc     resolver.ClientConn
-	// addrsUpdateChan is create for dynamically update the resolver when use. There are other ways.
-	addrsUpdateChan chan []string
-}
-
-// start is called in Build, for making some further initialization and listening to the updates.
-// It is the cc.UpdateState() that make ClientConn know which addresses contained by the scheme. Dial() does not get any data from resolver directly.
-func (r *exampleResolver) start() {
-	for addrStrs := range r.addrsUpdateChan {
-		log.Printf("resolver built with addresses %v\n", addrStrs)
-		addresses := make([]resolver.Address, len(addrStrs))
-		for i, s := range addrStrs {
-			addresses[i] = resolver.Address{Addr: s}
-		}
-		r.cc.UpdateState(resolver.State{Addresses: addresses})
-	}
 }
 
 // ResolveNow is a mystery. I don't know what it means.
 func (*exampleResolver) ResolveNow(o resolver.ResolveNowOptions) {}
 
 // Close things need to close.
-func (r *exampleResolver) Close() {
-	close(r.addrsUpdateChan)
-}
+func (r *exampleResolver) Close() {}
 
-// UpdateAddress can update address of the resolver.
+// UpdateAddrs can update address of the resolver.
 // I make the resolver a package level variable so we can use Resolver.UpdateAddress to update conveniently.
 // You can use other ways to update. Remember to call ClientConn.UpdateState after updating.
-func (r *exampleResolver) UpdateAddress(addrs []string) {
-	r.addrsUpdateChan <- addrs
+func (r *exampleResolver) UpdateAddrs(addrs []string) error {
+	addresses := make([]resolver.Address, len(addrs))
+	for i, addr := range addrs {
+		addresses[i] = resolver.Address{Addr: addr}
+	}
+	return r.cc.UpdateState(resolver.State{Addresses: addresses})
 }

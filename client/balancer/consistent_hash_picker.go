@@ -81,14 +81,3 @@ func (p *consistentHashPicker) Pick(info balancer.PickInfo) (balancer.PickResult
 func (p *consistentHashPicker) ResetAddrSubConn(addr string, sc balancer.SubConn) {
 	p.subConns[addr] = sc
 }
-
-// Refresh recreate the picker with the old pickHistory.
-func (p *consistentHashPicker) Refresh(subConns map[string]balancer.SubConn) {
-	addrs := make([]string, 0)
-	for addr := range subConns {
-		addrs = append(addrs, addr)
-	}
-	log.Printf("consistent hash picker built with addresses %v\n", addrs)
-	p.subConns = subConns
-	p.hashRing = hashring.New(addrs)
-}
