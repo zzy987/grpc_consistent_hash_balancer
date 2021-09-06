@@ -1,6 +1,5 @@
 package balancer
 
-import "C"
 import (
 	"context"
 	"fmt"
