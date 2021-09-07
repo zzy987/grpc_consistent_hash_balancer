@@ -33,7 +33,7 @@ func newConsistentHashBalancerBuilder() balancer.Builder {
 type consistentHashBalancerBuilder struct{}
 
 // Build creates a consistentHashBalancer, and starts its scManager.
-func (c *consistentHashBalancerBuilder) Build(cc balancer.ClientConn, opts balancer.BuildOptions) balancer.Balancer {
+func (builder *consistentHashBalancerBuilder) Build(cc balancer.ClientConn, opts balancer.BuildOptions) balancer.Balancer {
 	b := &consistentHashBalancer{
 		cc:             cc,
 		addrInfos:      make(map[string]resolver.Address),
@@ -48,7 +48,7 @@ func (c *consistentHashBalancerBuilder) Build(cc balancer.ClientConn, opts balan
 }
 
 // Name returns the name of the consistentHashBalancer registering in grpc.
-func (c *consistentHashBalancerBuilder) Name() string {
+func (builder *consistentHashBalancerBuilder) Name() string {
 	return Policy
 }
 
@@ -93,21 +93,21 @@ type consistentHashBalancer struct {
 
 // UpdateClientConnState is implemented from balancer.Balancer, modified from the baseBalancer,
 // ClientConn will call it after Builder builds the balancer to pass the necessary data.
-func (c *consistentHashBalancer) UpdateClientConnState(s balancer.ClientConnState) error {
-	c.resolverErr = nil
+func (b *consistentHashBalancer) UpdateClientConnState(s balancer.ClientConnState) error {
+	b.resolverErr = nil
 	addrsSet := make(map[string]struct{})
 	for _, a := range s.ResolverState.Addresses {
 		addr := a.Addr
-		c.addrInfos[addr] = a
+		b.addrInfos[addr] = a
 		addrsSet[addr] = struct{}{}
-		if sc, ok := c.subConns[addr]; !ok {
-			newSC, err := c.cc.NewSubConn([]resolver.Address{a}, balancer.NewSubConnOptions{HealthCheckEnabled: false})
+		if sc, ok := b.subConns[addr]; !ok {
+			newSC, err := b.cc.NewSubConn([]resolver.Address{a}, balancer.NewSubConnOptions{HealthCheckEnabled: false})
 			if err != nil {
 				log.Printf("Consistent Hash Balancer: failed to create new SubConn: %v", err)
 				continue
 			}
-			c.subConns[addr] = newSC
-			c.scInfos.Store(newSC, &subConnInfo{
+			b.subConns[addr] = newSC
+			b.scInfos.Store(newSC, &subConnInfo{
 				state: connectivity.Idle,
 				addr:  addr,
 			})
@@ -127,17 +127,17 @@ func (c *consistentHashBalancer) UpdateClientConnState(s balancer.ClientConnStat
 			// We should use another way to achieve ClientConn.UpdateState() with a picker before the first pick,
 			// for example, I call ClientConn.UpdateState() directly.
 		} else {
-			c.cc.UpdateAddresses(sc, []resolver.Address{a})
+			b.cc.UpdateAddresses(sc, []resolver.Address{a})
 		}
 	}
-	for a, sc := range c.subConns {
+	for a, sc := range b.subConns {
 		if _, ok := addrsSet[a]; !ok {
-			c.cc.RemoveSubConn(sc)
-			delete(c.subConns, a)
+			b.cc.RemoveSubConn(sc)
+			delete(b.subConns, a)
 		}
 	}
 	if len(s.ResolverState.Addresses) == 0 {
-		c.ResolverError(fmt.Errorf("produced zero addresses"))
+		b.ResolverError(fmt.Errorf("produced zero addresses"))
 		return balancer.ErrBadResolverState
 	}
 
@@ -145,63 +145,63 @@ func (c *consistentHashBalancer) UpdateClientConnState(s balancer.ClientConnStat
 	// Connection has not been ready yet. The next two lines is a trick aims to make grpc continue executing.
 	// if the picker is nil in ClientConn, it will block at next pick in pickerWrapper,
 	// So I have to generate the picker first.
-	c.regeneratePicker()
+	b.regeneratePicker()
 	// I call ClientConn.UpdateState() directly.
-	c.cc.UpdateState(balancer.State{ConnectivityState: connectivity.Ready, Picker: c.picker})
+	b.cc.UpdateState(balancer.State{ConnectivityState: connectivity.Ready, Picker: b.picker})
 
 	return nil
 }
 
 // ResolverError is implemented from balancer.Balancer, copied from baseBalancer.
-func (c *consistentHashBalancer) ResolverError(err error) {
-	c.resolverErr = err
+func (b *consistentHashBalancer) ResolverError(err error) {
+	b.resolverErr = err
 
-	c.regeneratePicker()
-	if c.state != connectivity.TransientFailure {
+	b.regeneratePicker()
+	if b.state != connectivity.TransientFailure {
 		// The picker will not change since the balancer does not currently
 		// report an error.
 		return
 	}
-	c.cc.UpdateState(balancer.State{
-		ConnectivityState: c.state,
-		Picker:            c.picker,
+	b.cc.UpdateState(balancer.State{
+		ConnectivityState: b.state,
+		Picker:            b.picker,
 	})
 }
 
 // regeneratePicker generates a new picker to replace the old one with new data, and update the state of the balancer.
-func (c *consistentHashBalancer) regeneratePicker() {
+func (b *consistentHashBalancer) regeneratePicker() {
 	availableSCs := make(map[string]balancer.SubConn)
-	for addr, sc := range c.subConns {
+	for addr, sc := range b.subConns {
 		// The next line may not be safe, but we have to use subConns without check,
 		// for we have not set up connections with any SubConn, all of them are Idle.
-		if st, ok := c.scInfos.Load(sc); ok && st.(*subConnInfo).state != connectivity.Shutdown && st.(*subConnInfo).state != connectivity.TransientFailure {
+		if st, ok := b.scInfos.Load(sc); ok && st.(*subConnInfo).state != connectivity.Shutdown && st.(*subConnInfo).state != connectivity.TransientFailure {
 			availableSCs[addr] = sc
 		}
 	}
 	if len(availableSCs) == 0 {
-		c.state = connectivity.TransientFailure
-		c.picker = base.NewErrPicker(c.mergeErrors())
+		b.state = connectivity.TransientFailure
+		b.picker = base.NewErrPicker(b.mergeErrors())
 	} else {
-		c.state = connectivity.Ready
-		c.picker = NewConsistentHashPickerWithReportChan(availableSCs, c.pickResultChan)
+		b.state = connectivity.Ready
+		b.picker = NewConsistentHashPickerWithReportChan(availableSCs, b.pickResultChan)
 	}
 }
 
 // mergeErrors is copied from baseBalancer.
-func (c *consistentHashBalancer) mergeErrors() error {
-	if c.connErr == nil {
-		return fmt.Errorf("last resolver error: %v", c.resolverErr)
+func (b *consistentHashBalancer) mergeErrors() error {
+	if b.connErr == nil {
+		return fmt.Errorf("last resolver error: %v", b.resolverErr)
 	}
-	if c.resolverErr == nil {
-		return fmt.Errorf("last connection error: %v", c.connErr)
+	if b.resolverErr == nil {
+		return fmt.Errorf("last connection error: %v", b.connErr)
 	}
-	return fmt.Errorf("last connection error: %v; last resolver error: %v", c.connErr, c.resolverErr)
+	return fmt.Errorf("last connection error: %v; last resolver error: %v", b.connErr, b.resolverErr)
 }
 
 // UpdateSubConnState is implemented by balancer.Balancer, modified from baseBalancer
-func (c *consistentHashBalancer) UpdateSubConnState(sc balancer.SubConn, state balancer.SubConnState) {
+func (b *consistentHashBalancer) UpdateSubConnState(sc balancer.SubConn, state balancer.SubConnState) {
 	s := state.ConnectivityState
-	v, ok := c.scInfos.Load(sc)
+	v, ok := b.scInfos.Load(sc)
 	if !ok {
 		return
 	}
@@ -217,36 +217,36 @@ func (c *consistentHashBalancer) UpdateSubConnState(sc balancer.SubConn, state b
 		// I do not know when it will come here.
 		// sc.Connect()
 	case connectivity.Shutdown:
-		c.scInfos.Delete(sc)
+		b.scInfos.Delete(sc)
 	case connectivity.TransientFailure:
-		c.connErr = state.ConnectionError
+		b.connErr = state.ConnectionError
 	}
 
 	if (s == connectivity.TransientFailure || s == connectivity.Shutdown) != (oldS == connectivity.TransientFailure || oldS == connectivity.Shutdown) ||
-		c.state == connectivity.TransientFailure {
-		c.regeneratePicker()
+		b.state == connectivity.TransientFailure {
+		b.regeneratePicker()
 	}
 
-	c.cc.UpdateState(balancer.State{ConnectivityState: c.state, Picker: c.picker})
+	b.cc.UpdateState(balancer.State{ConnectivityState: b.state, Picker: b.picker})
 }
 
 // Close is implemented by balancer.Balancer, copied from baseBalancer.
-func (c *consistentHashBalancer) Close() {}
+func (b *consistentHashBalancer) Close() {}
 
 // resetSubConn will replace a SubConn with a new idle SubConn.
-func (c *consistentHashBalancer) resetSubConn(sc balancer.SubConn) error {
-	addr, err := c.getSubConnAddr(sc)
+func (b *consistentHashBalancer) resetSubConn(sc balancer.SubConn) error {
+	addr, err := b.getSubConnAddr(sc)
 	if err != nil {
 		return err
 	}
 	log.Printf("Reset connect with addr %s", addr)
-	err = c.resetSubConnWithAddr(addr)
+	err = b.resetSubConnWithAddr(addr)
 	return err
 }
 
 // getSubConnAddr returns the address string of a SubConn.
-func (c *consistentHashBalancer) getSubConnAddr(sc balancer.SubConn) (string, error) {
-	v, ok := c.scInfos.Load(sc)
+func (b *consistentHashBalancer) getSubConnAddr(sc balancer.SubConn) (string, error) {
+	v, ok := b.scInfos.Load(sc)
 	if !ok {
 		return "", SubConnNotFoundError
 	}
@@ -254,51 +254,51 @@ func (c *consistentHashBalancer) getSubConnAddr(sc balancer.SubConn) (string, er
 }
 
 // resetSubConnWithAddr creates a new idle SubConn for the address string, and remove the old one.
-func (c *consistentHashBalancer) resetSubConnWithAddr(addr string) error {
-	sc, ok := c.subConns[addr]
+func (b *consistentHashBalancer) resetSubConnWithAddr(addr string) error {
+	sc, ok := b.subConns[addr]
 	if !ok {
 		return SubConnNotFoundError
 	}
-	c.scInfos.Delete(sc)
-	c.cc.RemoveSubConn(sc)
-	newSC, err := c.cc.NewSubConn([]resolver.Address{c.addrInfos[addr]}, balancer.NewSubConnOptions{HealthCheckEnabled: false})
+	b.scInfos.Delete(sc)
+	b.cc.RemoveSubConn(sc)
+	newSC, err := b.cc.NewSubConn([]resolver.Address{b.addrInfos[addr]}, balancer.NewSubConnOptions{HealthCheckEnabled: false})
 	if err != nil {
 		log.Printf("Consistent Hash Balancer: failed to create new SubConn: %v", err)
 		return ResetSubConnFailError
 	}
-	c.subConns[addr] = newSC
-	c.scInfos.Store(newSC, &subConnInfo{
+	b.subConns[addr] = newSC
+	b.scInfos.Store(newSC, &subConnInfo{
 		state: connectivity.Idle,
 		addr:  addr,
 	})
-	c.regeneratePicker()
-	c.cc.UpdateState(balancer.State{ConnectivityState: c.state, Picker: c.picker})
+	b.regeneratePicker()
+	b.cc.UpdateState(balancer.State{ConnectivityState: b.state, Picker: b.picker})
 	return nil
 }
 
 // scManager launches two goroutines to receive PickResult and query whether the context of the stored PickResult is done.
-func (c *consistentHashBalancer) scManager() {
+func (b *consistentHashBalancer) scManager() {
 	// The first goroutine listens to the pickResultChan, put pickResults into a queue.
 	// Because the second go routine will reset a SubConn if there is no pickResult with the SubConn in the queue,
 	// and we want to hold a SubConn for a while to reuse it, I use a "shadow context" with timeout to achieve both.
 	go func() {
 		for {
-			pr := <-c.pickResultChan
-			c.pickResults.EnQueue(pr)
+			pr := <-b.pickResultChan
+			b.pickResults.EnQueue(pr)
 			// Use a shadow context to ensure one of the necessary conditions of calling resetSubConn is that at least a defined time duration has passed since each previous request.
 			// This trick can reduce a goroutine traversing the entire map and compare time.Now() and the recorded expired time.
 			shadowCtx, _ := context.WithTimeout(context.Background(), connectionLifetime)
-			c.pickResults.EnQueue(PickResult{Ctx: shadowCtx, SC: pr.SC})
-			c.scCountsLock.Lock()
-			cnt, ok := c.scCounts[pr.SC]
+			b.pickResults.EnQueue(PickResult{Ctx: shadowCtx, SC: pr.SC})
+			b.scCountsLock.Lock()
+			cnt, ok := b.scCounts[pr.SC]
 			if !ok {
 				cnt = new(int32)
 				*cnt = 0
-				c.scCounts[pr.SC] = cnt
+				b.scCounts[pr.SC] = cnt
 			}
 			// I want to use sync.map to replace the map scCounts, so I use atomic. But I find it (the replacement) is not easy...
 			atomic.AddInt32(cnt, 2)
-			c.scCountsLock.Unlock()
+			b.scCountsLock.Unlock()
 		}
 	}()
 
@@ -307,7 +307,7 @@ func (c *consistentHashBalancer) scManager() {
 	// Oh no, TODO what if the picker picks the SubConn is resetting?
 	go func() {
 		for {
-			v, ok := c.pickResults.DeQueue()
+			v, ok := b.pickResults.DeQueue()
 			if !ok {
 				time.Sleep(connectionLifetime)
 				continue
@@ -315,20 +315,20 @@ func (c *consistentHashBalancer) scManager() {
 			pr := v.(PickResult)
 			select {
 			case <-pr.Ctx.Done():
-				c.scCountsLock.Lock()
-				cnt, ok := c.scCounts[pr.SC]
+				b.scCountsLock.Lock()
+				cnt, ok := b.scCounts[pr.SC]
 				if !ok {
-					c.scCountsLock.Unlock()
+					b.scCountsLock.Unlock()
 					break
 				}
 				atomic.AddInt32(cnt, -1)
 				if *cnt == 0 {
-					delete(c.scCounts, pr.SC)
-					c.resetSubConn(pr.SC)
+					delete(b.scCounts, pr.SC)
+					b.resetSubConn(pr.SC)
 				}
-				c.scCountsLock.Unlock()
+				b.scCountsLock.Unlock()
 			default:
-				c.pickResults.EnQueue(pr)
+				b.pickResults.EnQueue(pr)
 			}
 		}
 	}()
