@@ -147,7 +147,7 @@ func (b *consistentHashBalancer) UpdateClientConnState(s balancer.ClientConnStat
 	// So I have to generate the picker first.
 	b.regeneratePicker()
 	// I call ClientConn.UpdateState() directly.
-	b.cc.UpdateState(balancer.State{ConnectivityState: connectivity.Ready, Picker: b.picker})
+	b.cc.UpdateState(balancer.State{ConnectivityState: b.state, Picker: b.picker})
 
 	return nil
 }
