@@ -39,7 +39,6 @@ func (c *consistentHashBalancerBuilder) Build(cc balancer.ClientConn, opts balan
 		addrInfos:      make(map[string]resolver.Address),
 		subConns:       make(map[string]balancer.SubConn),
 		scInfos:        sync.Map{},
-		csEvltr:        &balancer.ConnectivityStateEvaluator{},
 		pickResultChan: make(chan PickResult),
 		pickResults:    util.NewQueue(),
 		scCounts:       make(map[balancer.SubConn]*int32),
@@ -63,10 +62,7 @@ type subConnInfo struct {
 type consistentHashBalancer struct {
 	// cc points to the balancer.ClientConn who creates the consistentHashBalancer.
 	cc balancer.ClientConn
-	//ccCheater sync.Once
 
-	// csEvltr appears in baseBalancer, I don't know much about it.
-	csEvltr *balancer.ConnectivityStateEvaluator
 	// state indicates the state of the whole ClientConn from the perspective of the balancer.
 	state connectivity.State
 
@@ -159,37 +155,36 @@ func (c *consistentHashBalancer) UpdateClientConnState(s balancer.ClientConnStat
 // ResolverError is implemented from balancer.Balancer, copied from baseBalancer.
 func (c *consistentHashBalancer) ResolverError(err error) {
 	c.resolverErr = err
-	if len(c.subConns) == 0 {
-		c.state = connectivity.TransientFailure
-	}
 
+	c.regeneratePicker()
 	if c.state != connectivity.TransientFailure {
 		// The picker will not change since the balancer does not currently
 		// report an error.
 		return
 	}
-	c.regeneratePicker()
 	c.cc.UpdateState(balancer.State{
 		ConnectivityState: c.state,
 		Picker:            c.picker,
 	})
 }
 
-// regeneratePicker generates a new picker to replace the old one with new data.
+// regeneratePicker generates a new picker to replace the old one with new data, and update the state of the balancer.
 func (c *consistentHashBalancer) regeneratePicker() {
-	if c.state == connectivity.TransientFailure {
-		c.picker = base.NewErrPicker(c.mergeErrors())
-		return
-	}
-	readySCs := make(map[string]balancer.SubConn)
+	availableSCs := make(map[string]balancer.SubConn)
 	for addr, sc := range c.subConns {
 		// The next line may not be safe, but we have to use subConns without check,
 		// for we have not set up connections with any SubConn, all of them are Idle.
 		if st, ok := c.scInfos.Load(sc); ok && st.(*subConnInfo).state != connectivity.Shutdown && st.(*subConnInfo).state != connectivity.TransientFailure {
-			readySCs[addr] = sc
+			availableSCs[addr] = sc
 		}
 	}
-	c.picker = NewConsistentHashPickerWithReportChan(readySCs, c.pickResultChan)
+	if len(availableSCs) == 0 {
+		c.state = connectivity.TransientFailure
+		c.picker = base.NewErrPicker(c.mergeErrors())
+	} else {
+		c.state = connectivity.Ready
+		c.picker = NewConsistentHashPickerWithReportChan(availableSCs, c.pickResultChan)
+	}
 }
 
 // mergeErrors is copied from baseBalancer.
@@ -220,17 +215,14 @@ func (c *consistentHashBalancer) UpdateSubConnState(sc balancer.SubConn, state b
 	switch s {
 	case connectivity.Idle:
 		// I do not know when it will come here.
-		sc.Connect()
+		// sc.Connect()
 	case connectivity.Shutdown:
 		c.scInfos.Delete(sc)
 	case connectivity.TransientFailure:
 		c.connErr = state.ConnectionError
 	}
 
-	c.state = c.csEvltr.RecordTransition(oldS, s)
-
-	// It seems like this if expression can be removed.
-	if (s == connectivity.Ready) != (oldS == connectivity.Ready) ||
+	if (s == connectivity.TransientFailure || s == connectivity.Shutdown) != (oldS == connectivity.TransientFailure || oldS == connectivity.Shutdown) ||
 		c.state == connectivity.TransientFailure {
 		c.regeneratePicker()
 	}
@@ -279,13 +271,8 @@ func (c *consistentHashBalancer) resetSubConnWithAddr(addr string) error {
 		state: connectivity.Idle,
 		addr:  addr,
 	})
-	if cp, ok := c.picker.(*consistentHashPicker); ok {
-		cp.ResetAddrSubConn(addr, newSC)
-		c.cc.UpdateState(balancer.State{ConnectivityState: c.state, Picker: c.picker})
-	} else {
-		c.regeneratePicker()
-		c.cc.UpdateState(balancer.State{ConnectivityState: c.state, Picker: c.picker})
-	}
+	c.regeneratePicker()
+	c.cc.UpdateState(balancer.State{ConnectivityState: c.state, Picker: c.picker})
 	return nil
 }
 

@@ -3,7 +3,6 @@ package balancer
 import (
 	"context"
 	"log"
-	"sync"
 
 	"github.com/serialx/hashring"
 	"google.golang.org/grpc/balancer"
@@ -11,11 +10,10 @@ import (
 
 // TODO add lock for maps or use sync.map
 type consistentHashPicker struct {
-	subConns    map[string]balancer.SubConn // address string -> balancer.SubConn
-	hashRing    *hashring.HashRing
-	pickHistory sync.Map // task_id -> target_address
-	needReport  bool
-	reportChan  chan<- PickResult
+	subConns   map[string]balancer.SubConn // address string -> balancer.SubConn
+	hashRing   *hashring.HashRing
+	needReport bool
+	reportChan chan<- PickResult
 }
 
 type PickResult struct {
@@ -30,10 +28,9 @@ func NewConsistentHashPicker(subConns map[string]balancer.SubConn) *consistentHa
 	}
 	log.Printf("consistent hash picker built with addresses %v\n", addrs)
 	return &consistentHashPicker{
-		subConns:    subConns,
-		hashRing:    hashring.New(addrs),
-		pickHistory: sync.Map{},
-		needReport:  false,
+		subConns:   subConns,
+		hashRing:   hashring.New(addrs),
+		needReport: false,
 	}
 }
 
@@ -44,11 +41,10 @@ func NewConsistentHashPickerWithReportChan(subConns map[string]balancer.SubConn,
 	}
 	log.Printf("consistent hash picker built with addresses %v\n", addrs)
 	return &consistentHashPicker{
-		subConns:    subConns,
-		hashRing:    hashring.New(addrs),
-		pickHistory: sync.Map{},
-		needReport:  true,
-		reportChan:  reportChan,
+		subConns:   subConns,
+		hashRing:   hashring.New(addrs),
+		needReport: true,
+		reportChan: reportChan,
 	}
 }
 
@@ -59,14 +55,8 @@ func (p *consistentHashPicker) Pick(info balancer.PickInfo) (balancer.PickResult
 		key = info.FullMethodName
 	}
 	log.Printf("pick for %s\n", key)
-	if historyAddr, ok := p.pickHistory.Load(key); ok {
-		ret.SubConn = p.subConns[historyAddr.(string)]
-		if p.needReport {
-			p.reportChan <- PickResult{Ctx: info.Ctx, SC: ret.SubConn}
-		}
-	} else if targetAddr, ok := p.hashRing.GetNode(key); ok {
+	if targetAddr, ok := p.hashRing.GetNode(key); ok {
 		ret.SubConn = p.subConns[targetAddr]
-		p.pickHistory.Store(key, targetAddr)
 		if p.needReport {
 			p.reportChan <- PickResult{Ctx: info.Ctx, SC: ret.SubConn}
 		}
@@ -76,8 +66,4 @@ func (p *consistentHashPicker) Pick(info balancer.PickInfo) (balancer.PickResult
 		return ret, balancer.ErrNoSubConnAvailable
 	}
 	return ret, nil
-}
-
-func (p *consistentHashPicker) ResetAddrSubConn(addr string, sc balancer.SubConn) {
-	p.subConns[addr] = sc
 }
